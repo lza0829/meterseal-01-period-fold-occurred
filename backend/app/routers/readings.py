@@ -1,18 +1,11 @@
 from __future__ import annotations
-import uuid
-from datetime import datetime, timezone
-
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from app.db import connect
-from app.services.gate import assert_period_writable
+from app.services import ingest_service
 
 router = APIRouter(tags=["readings"])
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 class EstimateIn(BaseModel):
@@ -48,25 +41,9 @@ def list_estimates(period_id: str | None = None):
 
 @router.post("/estimates")
 def create_estimate(body: EstimateIn):
-    assert_period_writable(body.period_id)
-    conn = connect()
-    try:
-        mid = conn.execute("SELECT 1 FROM meters WHERE meter_id=?", (body.meter_id,)).fetchone()
-        if not mid:
-            raise HTTPException(404, "表具不存在")
-        eid = "E-" + uuid.uuid4().hex[:10]
-        try:
-            conn.execute(
-                """INSERT INTO estimates(estimate_id,meter_id,period_id,qty,doc_no,loaded_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (eid, body.meter_id, body.period_id, body.qty, body.doc_no, _now()),
-            )
-            conn.commit()
-        except Exception as e:
-            raise HTTPException(409, f"估抄写入失败: {e}") from e
-        return {"estimate_id": eid, "ok": True}
-    finally:
-        conn.close()
+    return ingest_service.load_estimate(
+        meter_id=body.meter_id, period_id=body.period_id, qty=body.qty, doc_no=body.doc_no
+    )
 
 
 @router.get("/actuals")
@@ -86,31 +63,43 @@ def list_actuals(period_id: str | None = None):
 
 @router.post("/actuals")
 def create_actual(body: ActualIn):
-    assert_period_writable(body.period_id)
+    return ingest_service.load_actual(
+        meter_id=body.meter_id,
+        period_id=body.period_id,
+        qty=body.qty,
+        occurred_at=body.occurred_at,
+        reader_code=body.reader_code,
+        doc_no=body.doc_no,
+    )
+
+
+@router.get("/receipts")
+def list_receipts(
+    period_id: str | None = None,
+    declared_period_id: str | None = None,
+    kind: str | None = None,
+    decision: str | None = None,
+):
+    """装载回执（含拒绝记录）：落期口径可核对的审计面。"""
+    where, args = [], []
+    if period_id:
+        where.append("landing_period_id=?")
+        args.append(period_id)
+    if declared_period_id:
+        where.append("declared_period_id=?")
+        args.append(declared_period_id)
+    if kind:
+        where.append("kind=?")
+        args.append(kind)
+    if decision:
+        where.append("decision=?")
+        args.append(decision)
+    sql = "SELECT * FROM ingest_receipts"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC, receipt_id DESC LIMIT 200"
     conn = connect()
     try:
-        mid = conn.execute("SELECT 1 FROM meters WHERE meter_id=?", (body.meter_id,)).fetchone()
-        if not mid:
-            raise HTTPException(404, "表具不存在")
-        aid = "A-" + uuid.uuid4().hex[:10]
-        try:
-            conn.execute(
-                """INSERT INTO actuals(actual_id,meter_id,period_id,qty,occurred_at,reader_code,doc_no,loaded_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (
-                    aid,
-                    body.meter_id,
-                    body.period_id,
-                    body.qty,
-                    body.occurred_at,
-                    body.reader_code,
-                    body.doc_no,
-                    _now(),
-                ),
-            )
-            conn.commit()
-        except Exception as e:
-            raise HTTPException(409, f"实抄写入失败: {e}") from e
-        return {"actual_id": aid, "ok": True}
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
     finally:
         conn.close()

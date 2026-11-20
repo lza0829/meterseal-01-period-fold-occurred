@@ -1,12 +1,13 @@
 from __future__ import annotations
 import hashlib
+import json
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
 from app.db import connect
-from app.services.gate import assert_period_writable
+from app.services.gate import FOLD_RULE, require_period_open_tx
 
 
 def _now() -> str:
@@ -14,9 +15,16 @@ def _now() -> str:
 
 
 def run_align(period_id: str) -> dict:
-    assert_period_writable(period_id)
+    """对齐物化：只扫描落期账期（period_id 列即落期），批次快照记录折期口径。
+
+    快照字段：fold_rule=occurred_at、folded_count（折期笔数）、
+    declared_periods（折入本期的原申报账期集合）；指纹覆盖键集合与折期笔数，
+    落期变化 → 键集合/指纹变化，可对照。
+    """
     conn = connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        require_period_open_tx(conn, period_id)
         est = {
             r["meter_id"]: r
             for r in conn.execute(
@@ -38,6 +46,13 @@ def run_align(period_id: str) -> dict:
             "UPDATE reconcile_batches SET status='expired' WHERE period_id=? AND status='open'",
             (period_id,),
         )
+
+        folded_rows = [
+            r for r in act.values()
+            if r["declared_period_id"] and r["declared_period_id"] != period_id
+        ]
+        folded_count = len(folded_rows)
+        declared_periods = sorted({r["declared_period_id"] for r in folded_rows})
 
         batch_id = "B-" + uuid.uuid4().hex[:10]
         matched = 0
@@ -62,12 +77,19 @@ def run_align(period_id: str) -> dict:
                 )
             )
 
-        fp_src = f"{period_id}|{matched}|{len(variances)}|" + ",".join(keys)
+        fp_src = (
+            f"{period_id}|{matched}|{len(variances)}|{folded_count}|" + ",".join(keys)
+        )
         fingerprint = hashlib.sha256(fp_src.encode()).hexdigest()[:16]
         conn.execute(
-            """INSERT INTO reconcile_batches(batch_id,period_id,status,matched_count,variance_count,fingerprint,created_at)
-               VALUES (?,?, 'open',?,?,?,?)""",
-            (batch_id, period_id, matched, len(variances), fingerprint, _now()),
+            """INSERT INTO reconcile_batches(batch_id,period_id,status,matched_count,variance_count,
+               fingerprint,fold_rule,folded_count,declared_periods,created_at)
+               VALUES (?,?, 'open',?,?,?,?,?,?,?)""",
+            (
+                batch_id, period_id, matched, len(variances), fingerprint,
+                FOLD_RULE, folded_count, json.dumps(declared_periods, ensure_ascii=False),
+                _now(),
+            ),
         )
         if variances:
             conn.executemany(
@@ -82,6 +104,10 @@ def run_align(period_id: str) -> dict:
             "matched_count": matched,
             "variance_count": len(variances),
             "fingerprint": fingerprint,
+            "fold_rule": FOLD_RULE,
+            "folded_count": folded_count,
+            "declared_periods": declared_periods,
+            "keys": keys,
             "status": "open",
         }
     finally:
@@ -89,8 +115,10 @@ def run_align(period_id: str) -> dict:
 
 
 def seal_period(period_id: str, batch_id: str | None = None) -> dict:
+    """单账期封印（一次一封，不做多账期工单）。封印与装载写互斥串行。"""
     conn = connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         period = conn.execute(
             "SELECT * FROM periods WHERE period_id=?", (period_id,)
         ).fetchone()
@@ -148,6 +176,7 @@ def set_fate(variance_id: str, fate: str) -> dict:
         raise HTTPException(400, "非法命运")
     conn = connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT v.*, p.status AS period_status FROM variances v JOIN periods p ON p.period_id=v.period_id WHERE v.variance_id=?",
             (variance_id,),

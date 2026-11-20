@@ -32,6 +32,36 @@ def overview():
                 "SELECT * FROM reconcile_batches ORDER BY created_at DESC LIMIT 8"
             ).fetchall()
         ]
+        # 按账期计数：与按期列表同口径（WHERE period_id=?，period_id 即落期账期）
+        period_counts = []
+        for p in conn.execute("SELECT period_id, status FROM periods ORDER BY period_id DESC"):
+            pid = p["period_id"]
+            est_c = conn.execute(
+                "SELECT COUNT(*) AS c FROM estimates WHERE period_id=?", (pid,)
+            ).fetchone()["c"]
+            act_c = conn.execute(
+                "SELECT COUNT(*) AS c FROM actuals WHERE period_id=?", (pid,)
+            ).fetchone()["c"]
+            fold_c = conn.execute(
+                """SELECT COUNT(*) AS c FROM actuals
+                   WHERE period_id=? AND declared_period_id IS NOT NULL
+                     AND declared_period_id <> period_id""",
+                (pid,),
+            ).fetchone()["c"]
+            pend_c = conn.execute(
+                "SELECT COUNT(*) AS c FROM variances WHERE period_id=? AND fate='pending'",
+                (pid,),
+            ).fetchone()["c"]
+            period_counts.append(
+                {
+                    "period_id": pid,
+                    "status": p["status"],
+                    "estimates": est_c,
+                    "actuals": act_c,
+                    "folded_actuals": fold_c,
+                    "pending_variances": pend_c,
+                }
+            )
         return {
             "current_period": current,
             "open_periods": open_periods,
@@ -39,6 +69,7 @@ def overview():
             "meter_count": meters,
             "pending_variances": pending,
             "recent_batches": batches,
+            "period_counts": period_counts,
         }
     finally:
         conn.close()

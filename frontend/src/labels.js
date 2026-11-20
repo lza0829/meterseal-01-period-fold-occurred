@@ -9,6 +9,9 @@ export const 命运 = {
   accept_over: '认溢',
   quarantine: '隔离',
 }
+export const 回执决策 = { landed: '已落湖', rejected: '已拒绝' }
+export const 装载类别 = { estimate: '估抄', actual: '实抄' }
+export const 折期规则 = { occurred_at: '按发生时刻折月', declared: '按申报账期' }
 
 export function 标(map, key) {
   if (key == null || key === '') return '—'

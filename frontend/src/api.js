@@ -32,6 +32,11 @@ export const api = {
   },
   setFate: (id, fate) => req(`/variances/${id}/fate`, { method: 'POST', body: JSON.stringify({ fate }) }),
   seal: (body) => req('/seal', { method: 'POST', body: JSON.stringify(body) }),
+  receipts: (q) => {
+    const sp = new URLSearchParams(q || {})
+    const s = sp.toString()
+    return req('/receipts' + (s ? `?${s}` : ''))
+  },
   settings: () => req('/settings'),
   putSetting: (key, value) => req(`/settings/${key}`, { method: 'PUT', body: JSON.stringify({ value }) }),
 }
